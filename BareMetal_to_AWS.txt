@@ -1,0 +1,253 @@
+FROM VMWARE TO AWS
+
+
+
+You can use the AWS Command Line Interface (AWS CLI) to run a VM Import/Export job. Then, a copy of your server is created as an Amazon Machine Image (AMI) and uploaded to an Amazon S3 bucket. You can launch the AMI as an EC2 instance.
+For large-scale migrations, AWS Server Migration Service (SMS) automates the migration process
+
+-=-=-=-=-=-=-=-=-=- VM import/export requirements -=-=-=-=-=-=-=-=-=-
+https://docs.aws.amazon.com/vm-import/latest/userguide/vmie_prereqs.html
+
+--> we will use Open Virtual Appliance (OVA) image format for migration. So, first of all, we prepare OS to convertion to OVA.
+
+for Windows need to be done:
+ - Install the AWS CLI
+ - Disable any antivirus and enything that can prevent RDP session to future AWS instance
+ - Uninstall the VMware Tools from your VMware VM
+ - Disconnect any CD-ROM drives
+ - Your source VM must have a functional DHCP client service
+ - Shut down your VM
+ - Enable and check rdp client
+ - Install .NET Framework 4.5 or later on the VM.
+  >>>>>>>>>>>>>>>   check Licensing options, link above   <<<<<<<<<<<<<
+... If you cannot connect with mstsc to your VM because of security updates and limitation... You know... move limitation =D
+REG ADD HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\CredSSP\Parameters /v AllowEncryptionOracle /t REG_DWORD /d 2
+
+-=-=-=-=-=- Creating OVA fom VMDK and other VMWare stuff -=-=-=-=-
+
+If you use VMWare workstation, use "File -> Export to OVF..." tpo make OVF image from your installation
+After it search for app OVFTool (it must be somewhere around VMWare directory), use this app to convert OVF to OVA:
+
+> ovftool "C:\Users\***\Documents\Virtual Machines\EXPORT\Windows_Server_2012.ovf" "C:\Users\***\Documents\Virtual Machines\EXPORT\Windows_Server_2012.ova"
+
+Now it is ready for upload to AWS S3.
+
+-=-=-=-=-=-=-=-=- AWS CLI -=-=-=-=-=-=-=-
+
+
+...I've just created user with next permissions (A LOT OF POWER!!!!! =D):
+ - IAMFullAccess
+ - AmazonS3FullAccess
+ - PowerUserAccess
+
+
+Install and configure AWS CLI with this user: 
+
+C:\Users\***>aws configure
+AWS Access Key ID [****************ZHKO]: **********6QAL
+AWS Secret Access Key [****************G2wJ]: ****************oPPs
+Default region name [us-east-1]: us-east-1
+Default output format [ENTER]: json
+
+
+VM Import/Export requires a role to perform certain operations on your behalf. So... just create local file "trust-policy.json" with following content (change S3 bucket name "larx-os-images" to.. whatever you create):
+
+trust-policy.json file:
+{
+   "Version":"2012-10-17",
+   "Statement":[
+      {
+         "Effect": "Allow",
+         "Action": [
+            "s3:GetBucketLocation",
+            "s3:GetObject",
+            "s3:ListBucket" 
+         ],
+         "Resource": [
+            "arn:aws:s3:::larx-os-images",
+            "arn:aws:s3:::larx-os-images/*"
+         ]
+      },
+      {
+         "Effect": "Allow",
+         "Action": [
+            "s3:GetBucketLocation",
+            "s3:GetObject",
+            "s3:ListBucket",
+            "s3:PutObject",
+            "s3:GetBucketAcl"
+         ],
+         "Resource": [
+            "arn:aws:s3:::larx-os-images",
+            "arn:aws:s3:::larx-os-images/*"
+         ]
+      },
+      {
+         "Effect": "Allow",
+         "Action": [
+            "ec2:ModifySnapshotAttribute",
+            "ec2:CopySnapshot",
+            "ec2:RegisterImage",
+            "ec2:Describe*"
+         ],
+         "Resource": "*"
+      }
+   ]
+}
+
+
+and then execute aws cli (change path for the file tho):
+
+>aws iam create-role --role-name vmimport --assume-role-policy-document "file://C:\VM_to_AWS\trust-policy.json"
+
+Use the create-role command to create a role named vmimport and grant VM Import/Export access to it. Ensure that you specify the full path to the location of the "trust-policy.json" file that you created in the previous step, and that you include the file:// prefix as shown the following example:
+
+
+role-policy.json file:
+
+{
+   "Version":"2012-10-17",
+   "Statement":[
+      {
+         "Effect": "Allow",
+         "Action": [
+            "s3:GetBucketLocation",
+            "s3:GetObject",
+            "s3:ListBucket" 
+         ],
+         "Resource": [
+            "arn:aws:s3:::larx-os-images",
+            "arn:aws:s3:::larx-os-images/*"
+         ]
+      },
+      {
+         "Effect": "Allow",
+         "Action": [
+            "s3:GetBucketLocation",
+            "s3:GetObject",
+            "s3:ListBucket",
+            "s3:PutObject",
+            "s3:GetBucketAcl"
+         ],
+         "Resource": [
+            "arn:aws:s3:::larx-os-images",
+            "arn:aws:s3:::larx-os-images/*"
+         ]
+      },
+      {
+         "Effect": "Allow",
+         "Action": [
+            "ec2:ModifySnapshotAttribute",
+            "ec2:CopySnapshot",
+            "ec2:RegisterImage",
+            "ec2:Describe*"
+         ],
+         "Resource": "*"
+      }
+   ]
+}
+
+create role "vmimport":
+
+>aws iam put-role-policy --role-name vmimport --policy-name vmimport --policy-document "file://C:\VM_to_AWS\role-policy.json"
+
+
+
+Copy your OVA VM to S3:
+
+>aws s3 cp "C:\Users\***\Documents\Virtual Machines\EXPORT\Windows_Server_2012.ova" s3://larx-os-images
+
+upload: Documents\Virtual Machines\EXPORT\Windows_Server_2012.ova to s3://larx-os-images/Windows_Server_2012.ova
+
+
+
+
+-=-=-=-=-=-=-=-=- Import the VM from S3 to AMI =-=-=-=-=-=-=-=-
+
+https://docs.aws.amazon.com/vm-import/latest/userguide/vmimport-image-import.html
+
+After you upload your VM image file to Amazon S3, you can use the AWS CLI to import the image. These tools accept either the Amazon S3 bucket and path to the file or a URL for a public Amazon S3 file. Private Amazon S3 files require a presigned URL.
+
+ Import an OVA
+
+Use the following command to import an image with a single disk.
+
+>aws ec2 import-image --description "My server VM" --disk-containers "file://C:\VM_to_AWS\containers.json"
+
+The following is an example containers.json file.
+
+[
+  {
+    "Description": "My 2012R2 Server OVA",
+    "Format": "ova",
+    "UserBucket": {
+        "S3Bucket": "larx-os-images",
+        "S3Key": "Windows_Server_2012.ova"
+    }
+}]
+
+
+Checking:
+{
+    "Description": "My server VM",
+    "ImportTaskId": "import-ami-08ee9af6ff79363fd",
+    "Progress": "1",
+    "SnapshotDetails": [
+        {
+            "Description": "My 2012R2 Server OVA",
+            "DiskImageSize": 0.0,
+            "Format": "OVA",
+            "UserBucket": {
+                "S3Bucket": "larx-os-images",
+                "S3Key": "Windows_Server_2012.ova"
+            }
+        }
+    ],
+    "Status": "active",
+    "StatusMessage": "pending"
+}
+
+SEE the "ImportTaskId": "import-ami-08ee9af6ff79363fd"? You can use it for import checking status:
+
+>aws ec2 describe-import-image-tasks --import-task-ids import-ami-013fd4f65fba717fb
+{
+    "ImportImageTasks": [
+        {
+            "Description": "My server VM",
+            "ImportTaskId": "import-ami-013fd4f65fba717fb",
+            "Platform": "Windows",
+            "Progress": "27",
+            "SnapshotDetails": [
+                {
+                    "DeviceName": "/dev/sdf",
+                    "DiskImageSize": 6002596864.0,
+                    "Format": "VMDK",
+                    "Status": "completed",
+                    "UserBucket": {
+                        "S3Bucket": "larx-os-images",
+                        "S3Key": "Windows_Server_2012.ova"
+                    }
+                }
+            ],
+            "Status": "active",
+            "StatusMessage": "updating",
+            "Tags": []
+        }
+    ]
+}
+
+
+
+On the AWS:
+
+launch new AMI in EC2:
+ - create VPC (like 192.168.0.0/16)
+ - create IGW (Internet gateway) and attach it to VPC
+ - create subnet insede the VPC(like 192.168.1.0/24)
+ - fix Routing table if needed (check fop 0.0.0.0/0 to IGW)
+ 
+ Start inctance!!!!!
+ 
+------------------------------------------
+just in case
+https://aws.amazon.com/premiumsupport/knowledge-center/import-server-ec2-instance/
